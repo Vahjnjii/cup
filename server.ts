@@ -69,6 +69,101 @@ async function startServer() {
       });
   });
 
+  // Server-side FFmpeg Stitching endpoint
+  app.post("/api/video/stitch", async (req, res) => {
+    const { scenes, audioBase64 } = req.body;
+    
+    if (!scenes || !Array.isArray(scenes) || scenes.length === 0) {
+      return res.status(400).json({ error: "No scenes provided" });
+    }
+
+    const sessionId = Date.now().toString();
+    const sessionDir = path.join("tmp", sessionId);
+    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir);
+
+    try {
+      const imagePaths: string[] = [];
+      const concatFilePath = path.join(sessionDir, "concat.txt");
+      let concatContent = "";
+
+      // Save audio
+      const audioPath = path.join(sessionDir, "audio.wav");
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      fs.writeFileSync(audioPath, audioBuffer);
+
+      // Process scenes
+      for (let i = 0; i < scenes.length; i++) {
+        const scene = scenes[i];
+        const imgPath = path.join(sessionDir, `img_${i}.webp`);
+        
+        if (scene.imageUrl.startsWith("data:")) {
+          const baseData = scene.imageUrl.split(",")[1];
+          fs.writeFileSync(imgPath, Buffer.from(baseData, "base64"));
+        } else {
+          // Download if it's a URL (assuming axios is available or use native fetch)
+          const response = await fetch(scene.imageUrl);
+          const arrayBuffer = await response.arrayBuffer();
+          fs.writeFileSync(imgPath, Buffer.from(arrayBuffer));
+        }
+        
+        imagePaths.push(imgPath);
+        
+        // Calculate duration: if it's the last scene, we might need a default or use the total audio length
+        // But for now we rely on the duration provided by the client
+        concatContent += `file '${path.resolve(imgPath)}'\n`;
+        concatContent += `duration ${scene.duration}\n`;
+      }
+      
+      // FFmpeg quirk: last image needs to be repeated or it might be cut off
+      if (scenes.length > 0) {
+        concatContent += `file '${path.resolve(imagePaths[imagePaths.length - 1])}'\n`;
+      }
+
+      fs.writeFileSync(concatFilePath, concatContent);
+
+      const outputPath = path.join(sessionDir, "output.mp4");
+
+      console.log("Starting FFmpeg stitch for session:", sessionId);
+
+      ffmpeg()
+        .input(concatFilePath)
+        .inputOptions(["-f concat", "-safe 0"])
+        .input(audioPath)
+        .outputOptions([
+          '-c:v libx264',
+          '-pix_fmt yuv420p',
+          '-preset fast',
+          '-crf 22',
+          '-c:a aac',
+          '-b:a 192k',
+          '-shortest', // Finish when audio ends
+          '-movflags +faststart'
+        ])
+        .save(outputPath)
+        .on('end', () => {
+          console.log("Stitching finished! Sending MP4 back.");
+          res.download(outputPath, "video.mp4", (err) => {
+            if (err) console.error("Error sending file:", err);
+            
+            // Cleanup session directory
+            setTimeout(() => {
+              fs.rm(sessionDir, { recursive: true, force: true }, () => {});
+            }, 10000); // 10s delay to ensure file is sent
+          });
+        })
+        .on('error', (err) => {
+          console.error("FFmpeg stitching error:", err);
+          res.status(500).json({ error: "Stitching failed: " + err.message });
+          fs.rm(sessionDir, { recursive: true, force: true }, () => {});
+        });
+
+    } catch (error: any) {
+      console.error("Setup error for stitching:", error);
+      res.status(500).json({ error: error.message });
+      fs.rm(sessionDir, { recursive: true, force: true }, () => {});
+    }
+  });
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

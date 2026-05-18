@@ -636,102 +636,37 @@ jobs:
         with:
           fetch-depth: 2
       
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          
-      - name: Install Puppeteer and FFmpeg
+      - name: Install FFmpeg
         run: |
-          npm install puppeteer
           sudo apt-get update && sudo apt-get install -y ffmpeg
         
-      - name: Render Video with Puppeteer
-        env:
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-          APP_URL: ${window.location.href.split('?')[0].replace(/\/$/, '')}/
+      - name: Render Video with FFmpeg
         run: |
-          cat << 'EOF' > render.cjs
-          const puppeteer = require('puppeteer');
-          const fs = require('fs');
-          
-          async function run() {
-            // Use global object to avoid Vite crashing or altering process.env
-            const projId = process.argv[2];
-            const appUrl = process.argv[3];
-            const token = process['env']['GITHUB_TOKEN'];
-            
-            const browser = await puppeteer.launch({
-              headless: "new",
-              args: ['--no-sandbox', '--disable-web-security', '--autoplay-policy=no-user-gesture-required', '--use-gl=egl', '--window-size=1080,1920']
-            });
-            
-            const page = await browser.newPage();
-            
-            // Allow downloads
-            const client = await page.target().createCDPSession();
-            await client.send('Page.setDownloadBehavior', {
-              behavior: 'allow',
-              downloadPath: process.cwd()
-            });
-            
-            await page.setViewport({ width: 1080, height: 1920, deviceScaleFactor: 1 });
-            
-            await page.evaluateOnNewDocument((ghToken) => {
-              localStorage.setItem('GITHUB_TOKEN', ghToken);
-              window.isHeadless = true;
-            }, token);
-            
-            // Clean up appUrl logic
-            const url = \`\${appUrl}?projectId=\${projId}&render=true\`;
-            console.log(\`Navigating to \${url}\`);
-            
-            await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
-            
-            console.log("Waiting for render to finish... This takes the duration of the audio.");
-            await page.waitForFunction('!!window._renderComplete', { timeout: 30 * 60 * 1000 });
-            
-            console.log("Render complete on frontend! Waiting for download...");
-            
-            const checkFile = () => new Promise(r => {
-              const iv = setInterval(() => {
-                if (fs.existsSync('preview.webm')) {
-                  clearInterval(iv);
-                  setTimeout(r, 2000); // wait a bit for file to flush
-                }
-              }, 1000);
-            });
-            
-            await checkFile();
-            await browser.close();
-          }
-          run().catch(e => { console.error(e); process.exit(1); });
-          EOF
-          
           CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r \${{ github.sha }} || echo "")
           PROJECT_ID="\${{ github.event.inputs.project_id }}"
           
           if [ -z "$PROJECT_ID" ]; then
-            for timeline in $(echo "$CHANGED_FILES" | grep 'timeline.txt' || true); do
-              if [ -f "$timeline" ]; then
-                PROJECT_ID=$(basename $(dirname "$timeline"))
+            for path in $(echo "$CHANGED_FILES" | grep 'script.txt\|timeline.txt' || true); do
+              if [ -f "$path" ]; then
+                PROJECT_ID=$(basename $(dirname "$path"))
                 break
               fi
             done
           fi
           
-          if [ ! -z "$PROJECT_ID" ]; then
-            echo "Rendering project $PROJECT_ID"
-            node render.cjs "$PROJECT_ID" "\${{ env.APP_URL }}"
+          if [ ! -z "$PROJECT_ID" ] && [ -d "projects/$PROJECT_ID" ]; then
+            echo "Direct FFmpeg rendering for project $PROJECT_ID"
+            cd "projects/$PROJECT_ID"
             
-            if [ -f preview.webm ]; then
-              echo "Converting WebM to MP4..."
-              ffmpeg -i preview.webm -c:v libx264 -preset slow -crf 18 -c:a aac -b:a 192k output.mp4
-              gh release create "vid-\${PROJECT_ID}" output.mp4 --title "Video \${PROJECT_ID}" --notes "Rendered exact MP4 preview via Headless Browser Action" || true
-            else
-              echo "Error: preview.webm not found"
-              exit 1
-            fi
+            # Prepare concat file
+            cp timeline.txt concat.txt
+            # Ensure last image has a duration by repeating it (FFmpeg quirk)
+            tail -n 2 timeline.txt | head -n 1 >> concat.txt
+            
+            ffmpeg -f concat -safe 0 -i concat.txt -i audio.wav -c:v libx264 -pix_fmt yuv420p -preset slow -crf 18 -c:a aac -b:a 192k -shortest output.mp4
+            gh release create "vid-\${PROJECT_ID}" output.mp4 --title "Video \${PROJECT_ID}" --notes "Direct FFmpeg render (No Browser)" || true
+          else
+            echo "No project ID found to render or project directory missing"
           fi
 `;
     const workflowBase64 = btoa(encodeURIComponent(workflowContent).replace(/%([0-9A-F]{2})/g, (m, p1) => String.fromCharCode(parseInt(p1, 16))));
@@ -1061,149 +996,78 @@ jobs:
 
   useEffect(() => {
     if ((window as any).isHeadless && scenes.length > 0 && !isGenerating && !isPlaying && audioUrl) {
-      handleRecordVideo();
+      handleStitchVideo();
     }
   }, [scenes, isGenerating, isPlaying, audioUrl]);
 
-  const isRecordingRef = useRef(false);
-  const handleRecordVideo = async () => {
-    if (!canvasRef.current || !audioUrl) return;
-    if (isRecordingRef.current) return;
-    isRecordingRef.current = true;
+  const handleStitchVideo = async () => {
+    if (scenes.length === 0 || !audioUrl) return;
+    setStatus('Sending to server for high-speed FFmpeg stitching...');
+    setProgress(0);
     
     try {
-      await document.fonts.ready;
-    } catch (e) {
-      console.warn("Font pre-load readiness failed, proceeding anyway", e);
-    }
-    console.log("Starting high-quality recording (9:16)...");
-    
-    const canvas = canvasRef.current;
-    // Force specific bitrates and 60fps for maximum quality
-    const stream = canvas.captureStream(60);
-    
-    const audio = audioRef.current;
-    if (!audio) return;
-    
-    if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    const audioCtx = audioContextRef.current;
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
-    
-    if (!sourceNodeRef.current) {
-        try {
-            sourceNodeRef.current = audioCtx.createMediaElementSource(audio);
-        } catch (e) {
-            console.warn("Failed to create media element source in record:", e);
-        }
-    }
-    const source = sourceNodeRef.current;
-    if (source) {
-       const dest = audioCtx.createMediaStreamDestination();
-       source.connect(dest);
-       source.connect(audioCtx.destination);
-       dest.stream.getAudioTracks().forEach(track => stream.addTrack(track));
-    }
-
-    let mimeType = 'video/webm;codecs=vp9,opus';
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = 'video/webm';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'video/mp4'; // Safari fallback
+      // 1. Get audio as base64
+      let audioBase64 = "";
+      if (audioUrl.startsWith('data:audio/')) {
+        audioBase64 = audioUrl.split(',')[1];
+      } else {
+        const audioRes = await fetch(audioUrl);
+        const audioBlob = await audioRes.blob();
+        audioBase64 = await blobToBase64(audioBlob);
       }
-    }
 
-    const recorder = new MediaRecorder(stream, {
-      mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : '',
-      videoBitsPerSecond: 25000000 // 25Mbps for ultra quality
-    });
+      // 2. Prepare scenes with calculated durations
+      const scenesWithDurations = scenes.map((scene, i) => {
+        const nextTimestamp = i < scenes.length - 1 ? scenes[i + 1].timestamp : duration;
+        return {
+          imageUrl: scene.imageUrl,
+          duration: Math.max(0.1, nextTimestamp - scene.timestamp)
+        };
+      });
 
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
+      // 3. Send to backend
+      const response = await fetch("/api/video/stitch", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          scenes: scenesWithDurations,
+          audioBase64: audioBase64
+        })
+      });
 
-    recorder.onstop = async () => {
-      const actualMimeType = mimeType || '';
-      const ext = actualMimeType.includes('mp4') ? 'mp4' : 'webm';
-      const blob = new Blob(chunks, { type: actualMimeType });
-      (window as any)._finalVideoBlob = blob;
-      console.log("Final video blob ready (9:16 aspect ratio confirmed)");
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Stitching failed");
+      }
+
+      const videoBlob = await response.blob();
+      const videoUrl = URL.createObjectURL(videoBlob);
       
       if ((window as any).isHeadless) {
-        console.log("In headless mode, directly downloading file for GitHub action...");
-        const url = URL.createObjectURL(blob);
+        console.log("Stitching complete in headless mode! Downloading...");
         const a = document.createElement("a");
-        a.href = url;
-        a.download = `preview.${ext}`;
+        a.href = videoUrl;
+        a.download = `preview.mp4`;
         a.click();
-        URL.revokeObjectURL(url);
-        setStatus('Render complete! Blob downloaded.');
-        isRecordingRef.current = false;
+        URL.revokeObjectURL(videoUrl);
+        setStatus('Server-side stitch complete!');
         setTimeout(() => { (window as any)._renderComplete = true; }, 1000);
-        return;
-      }
-      
-      setStatus('Sending to backend to render exact preview to MP4. Please wait...');
-      try {
-        const formData = new FormData();
-        formData.append("video", blob, `preview.${ext}`);
-        
-        const response = await fetch("/api/video/render", {
-          method: "POST",
-          body: formData
-        });
-        
-        if (!response.ok) throw new Error("Render Failed");
-        
-        const mp4Blob = await response.blob();
-        const url = URL.createObjectURL(mp4Blob);
-        
-        // Trigger download
+      } else {
         const a = document.createElement("a");
-        a.href = url;
-        a.download = `video_render_${Date.now()}.mp4`;
+        a.href = videoUrl;
+        a.download = `video_stitch_${Date.now()}.mp4`;
         a.click();
-        URL.revokeObjectURL(url);
-        
-        setStatus('Ready!');
-      } catch (err: any) {
-        console.error("Backend render failed:", err);
-        setStatus("MP4 conversion failed, downloading WebM fallback instead...");
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `video_render_${Date.now()}.${ext}`;
-        a.click();
-        URL.revokeObjectURL(url);
-        setStatus(`Ready! (${ext.toUpperCase()} Fallback)`);
-      } finally {
-        isRecordingRef.current = false;
+        URL.revokeObjectURL(videoUrl);
+        setStatus('Video generated successfully!');
       }
-    };
 
-    recorder.start();
-    audio.currentTime = 0;
-    setTimeout(() => {
-      handlePlay();
-    }, 500); // Slight delay to ensure recorder is ready
-    
-    let stuckCount = 0;
-    let expectedDuration = scenes.length > 0 ? scenes[scenes.length - 1].timestamp + 5 : 60;
-    
-    const checkEnd = setInterval(() => {
-      // Sometimes audio.ended is not reliable or currentTime gets stuck near the end
-      if (audio.ended || audio.currentTime >= (audio.duration || expectedDuration) - 0.1 || stuckCount > (expectedDuration * 10 + 50)) {
-        clearInterval(checkEnd);
-        if (recorder.state !== 'inactive') {
-            recorder.stop();
-        }
-        handlePause();
-        console.log("Recording stopped at end of audio.");
-      }
-      stuckCount++;
-    }, 100);
+    } catch (err: any) {
+      console.error("Stitching error:", err);
+      setError("Stitching failed: " + err.message);
+      setStatus('Error during stitching');
+    }
   };
 
   const handlePause = () => {
@@ -1516,13 +1380,13 @@ jobs:
         } catch (e: any) {
           console.error(e);
           setStatus('Failed to upload to GitHub: ' + e.message + '. Falling back to local render...');
-          if (!(window as any).isHeadless) setTimeout(() => handleRecordVideo(), 500);
+          if (!(window as any).isHeadless) setTimeout(() => handleStitchVideo(), 500);
         }
       } else {
         setStatus((window as any).isHeadless ? 'Headless generation complete, handing off to renderer...' : 'Starting local exact preview render recording... DO NOT SWITCH TABS');
         if (!(window as any).isHeadless) {
           setTimeout(() => {
-            handleRecordVideo();
+            handleStitchVideo();
           }, 500);
         }
       }
@@ -2073,7 +1937,7 @@ jobs:
                <button
                  onClick={() => {
                    if (window.confirm("This will play the video from start to finish to record exactly what you see. Proceed?")) {
-                     handleRecordVideo();
+                     handleStitchVideo();
                    }
                  }}
                  className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-black text-xs font-bold px-3 py-1.5 rounded-lg transition-transform hover:scale-105 shadow-[0_0_10px_rgba(249,115,22,0.3)] whitespace-nowrap"
