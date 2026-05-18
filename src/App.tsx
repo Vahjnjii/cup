@@ -1016,14 +1016,34 @@ jobs:
         audioBase64 = await blobToBase64(audioBlob);
       }
 
-      // 2. Prepare scenes with calculated durations
-      const scenesWithDurations = scenes.map((scene, i) => {
+      // 2. Prepare scenes with calculated durations and convert blob URLs to base64
+      const processedScenes = await Promise.all(scenes.map(async (scene, i) => {
         const nextTimestamp = i < scenes.length - 1 ? scenes[i + 1].timestamp : duration;
+        let imgBase64 = "";
+        
+        if (scene.imageUrl) {
+          try {
+            if (scene.imageUrl.startsWith('data:')) {
+              imgBase64 = scene.imageUrl;
+            } else {
+              const imgRes = await fetch(scene.imageUrl);
+              const imgBlob = await imgRes.blob();
+              imgBase64 = await blobToBase64(imgBlob);
+              // Ensure it has the data prefix if blobToBase64 doesn't include it
+              if (!imgBase64.startsWith('data:')) {
+                imgBase64 = `data:image/webp;base64,${imgBase64}`;
+              }
+            }
+          } catch (e) {
+            console.error(`Failed to convert image ${i} to base64`, e);
+          }
+        }
+
         return {
-          imageUrl: scene.imageUrl,
+          imageUrl: imgBase64 || scene.imageUrl, // Fallback to URL if base64 failed (though URL will likely fail on server)
           duration: Math.max(0.1, nextTimestamp - scene.timestamp)
         };
-      });
+      }));
 
       // 3. Send to backend
       const response = await fetch("/api/video/stitch", {
@@ -1032,7 +1052,7 @@ jobs:
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          scenes: scenesWithDurations,
+          scenes: processedScenes,
           audioBase64: audioBase64
         })
       });

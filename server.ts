@@ -5,6 +5,10 @@ import { createServer as createViteServer } from "vite";
 import multer from "multer";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import axios from "axios";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -99,11 +103,15 @@ async function startServer() {
         if (scene.imageUrl.startsWith("data:")) {
           const baseData = scene.imageUrl.split(",")[1];
           fs.writeFileSync(imgPath, Buffer.from(baseData, "base64"));
+        } else if (scene.imageUrl.startsWith("http")) {
+          // Download if it's a URL
+          const response = await axios.get(scene.imageUrl, { responseType: 'arraybuffer' });
+          fs.writeFileSync(imgPath, response.data);
         } else {
-          // Download if it's a URL (assuming axios is available or use native fetch)
-          const response = await fetch(scene.imageUrl);
-          const arrayBuffer = await response.arrayBuffer();
-          fs.writeFileSync(imgPath, Buffer.from(arrayBuffer));
+          console.warn(`Invalid image URL at scene ${i}:`, scene.imageUrl);
+          // Create a dummy black image or skip? Let's skip and see if it breaks concat.
+          // Better: skip from concat if image missing
+          continue;
         }
         
         imagePaths.push(imgPath);
