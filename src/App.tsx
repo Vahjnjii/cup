@@ -1379,11 +1379,11 @@ jobs:
           setStatus(`Project safely sent to GitHub! The Action is now rendering the exact same preview to MP4 in the ${getProjectRepoName()} repository Actions tab.`);
         } catch (e: any) {
           console.error(e);
-          setStatus('Failed to upload to GitHub: ' + e.message + '. Falling back to local render...');
+          setStatus('Failed to upload to GitHub: ' + e.message + '. Falling back to high-speed stitch...');
           if (!(window as any).isHeadless) setTimeout(() => handleStitchVideo(), 500);
         }
       } else {
-        setStatus((window as any).isHeadless ? 'Headless generation complete, handing off to renderer...' : 'Starting local exact preview render recording... DO NOT SWITCH TABS');
+        setStatus((window as any).isHeadless ? 'Handing off to high-speed FFmpeg renderer...' : 'Starting server-side FFmpeg stitch...');
         if (!(window as any).isHeadless) {
           setTimeout(() => {
             handleStitchVideo();
@@ -1936,14 +1936,14 @@ jobs:
              {scenes.length > 0 && !isGenerating && !isPlaying && (
                <button
                  onClick={() => {
-                   if (window.confirm("This will play the video from start to finish to record exactly what you see. Proceed?")) {
+                   if (window.confirm("This will use server-side FFmpeg to stitch your scenes into a high-quality video instantly. Proceed?")) {
                      handleStitchVideo();
                    }
                  }}
                  className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-black text-xs font-bold px-3 py-1.5 rounded-lg transition-transform hover:scale-105 shadow-[0_0_10px_rgba(249,115,22,0.3)] whitespace-nowrap"
                >
                  <Video size={14} />
-                 Render to MP4 (Exact)
+                 Stitch to MP4 (Fast)
                </button>
              )}
 
