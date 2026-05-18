@@ -1,0 +1,6 @@
+file 'images/image_0.jpg'
+duration 3.921904761904762
+file 'images/image_1.jpg'
+duration 4.327619047619048
+file 'images/image_2.jpg'
+duration 5
