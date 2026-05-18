@@ -1061,9 +1061,94 @@ jobs:
 
   useEffect(() => {
     if ((window as any).isHeadless && scenes.length > 0 && !isGenerating && !isPlaying && audioUrl) {
-      handleRecordVideo();
+      handleStitchVideo();
     }
   }, [scenes, isGenerating, isPlaying, audioUrl]);
+
+  const handleStitchVideo = async () => {
+    if (scenes.length === 0 || !audioUrl) return;
+    setStatus('Sending to server for high-speed FFmpeg stitching...');
+    setProgress(0);
+    
+    try {
+      // 1. Get audio as base64
+      let audioBase64 = "";
+      if (audioUrl.startsWith('data:audio/')) {
+        audioBase64 = audioUrl.split(',')[1];
+      } else {
+        const audioRes = await fetch(audioUrl);
+        const audioBlob = await audioRes.blob();
+        audioBase64 = await (async () => {
+          return new Promise<string>((resolve, _) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.readAsDataURL(audioBlob);
+          });
+        })();
+      }
+
+      // 2. Prepare scenes with calculated durations and clean URLs
+      const processedScenes = await Promise.all(scenes.map(async (scene, i) => {
+        const nextTimestamp = i < scenes.length - 1 ? scenes[i + 1].timestamp : duration;
+        let imgFinal = scene.imageUrl;
+        
+        // Only convert blob: or local URLs to base64 to save upload size
+        if (scene.imageUrl && scene.imageUrl.startsWith('blob:')) {
+          try {
+            const imgRes = await fetch(scene.imageUrl);
+            const imgBlob = await imgRes.blob();
+            const base64 = await (async () => {
+              return new Promise<string>((resolve, _) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result as string);
+                reader.readAsDataURL(imgBlob);
+              });
+            })();
+            imgFinal = base64;
+          } catch (e) {
+            console.error(`Failed to convert image ${i} to base64`, e);
+          }
+        }
+
+        return {
+          imageUrl: imgFinal,
+          duration: Math.max(0.1, nextTimestamp - scene.timestamp)
+        };
+      }));
+
+      // 3. Send to backend
+      const response = await fetch("/api/video/stitch", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          scenes: processedScenes,
+          audioBase64: audioBase64.split(',')[1] || audioBase64 // stripped header if present
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Stitching failed");
+      }
+
+      const videoBlob = await response.blob();
+      const videoUrl = URL.createObjectURL(videoBlob);
+      
+      const a = document.createElement("a");
+      a.href = videoUrl;
+      a.download = `video_stitch_${Date.now()}.mp4`;
+      a.click();
+      URL.revokeObjectURL(videoUrl);
+      setStatus('Video generated successfully!');
+
+    } catch (err: any) {
+      console.error("Stitching error:", err);
+      setError("Stitching failed: " + err.message);
+      setStatus('Error during stitching');
+    }
+  };
 
   const isRecordingRef = useRef(false);
   const handleRecordVideo = async () => {
@@ -1516,13 +1601,13 @@ jobs:
         } catch (e: any) {
           console.error(e);
           setStatus('Failed to upload to GitHub: ' + e.message + '. Falling back to high-speed stitch...');
-          if (!(window as any).isHeadless) setTimeout(() => handleRecordVideo(), 500);
+          if (!(window as any).isHeadless) setTimeout(() => handleStitchVideo(), 500);
         }
       } else {
-        setStatus((window as any).isHeadless ? 'Headless generation complete, handing off to renderer...' : 'Starting local exact preview render recording... DO NOT SWITCH TABS');
+        setStatus((window as any).isHeadless ? 'Headless generation complete, handing off to renderer...' : 'Starting server-side FFmpeg stitch...');
         if (!(window as any).isHeadless) {
           setTimeout(() => {
-            handleRecordVideo();
+            handleStitchVideo();
           }, 500);
         }
       }
@@ -2072,14 +2157,14 @@ jobs:
              {scenes.length > 0 && !isGenerating && !isPlaying && (
                <button
                  onClick={() => {
-                   if (window.confirm("This will play the video from start to finish to record exactly what you see. Proceed?")) {
-                     handleRecordVideo();
+                   if (window.confirm("This will use server-side FFmpeg to stitch your scenes into a high-quality video instantly. Proceed?")) {
+                     handleStitchVideo();
                    }
                  }}
                  className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-black text-xs font-bold px-3 py-1.5 rounded-lg transition-transform hover:scale-105 shadow-[0_0_10px_rgba(249,115,22,0.3)] whitespace-nowrap"
                >
                  <Video size={14} />
-                 Render to MP4 (Exact)
+                 Stitch to MP4 (Fast)
                </button>
              )}
 

@@ -76,7 +76,7 @@ async function startServer() {
 
   // Server-side FFmpeg Stitching endpoint
   app.post("/api/video/stitch", async (req, res) => {
-    console.log(`Received stitch request. Payload size approx: ${JSON.stringify(req.body).length / 1024 / 1024} MB`);
+    console.log(`Received stitch request with ${req.body?.scenes?.length || 0} scenes.`);
     const { scenes, audioBase64 } = req.body;
     
     if (!scenes || !Array.isArray(scenes) || scenes.length === 0) {
@@ -106,9 +106,14 @@ async function startServer() {
           const baseData = scene.imageUrl.split(",")[1];
           fs.writeFileSync(imgPath, Buffer.from(baseData, "base64"));
         } else if (scene.imageUrl.startsWith("http")) {
-          // Download if it's a URL
-          const response = await axios.get(scene.imageUrl, { responseType: 'arraybuffer' });
-          fs.writeFileSync(imgPath, response.data);
+          try {
+            // Download if it's a URL
+            const response = await axios.get(scene.imageUrl, { responseType: 'arraybuffer', timeout: 10000 });
+            fs.writeFileSync(imgPath, response.data);
+          } catch (dlErr) {
+            console.error(`Failed to download image from ${scene.imageUrl}`, dlErr);
+            continue;
+          }
         } else {
           console.warn(`Invalid image URL at scene ${i}:`, scene.imageUrl);
           // Create a dummy black image or skip? Let's skip and see if it breaks concat.
