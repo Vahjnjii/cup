@@ -32,7 +32,8 @@ async function startServer() {
   const PORT = 3000;
 
   // Middleware
-  app.use(express.json({ limit: "50mb" }));
+  app.use(express.json({ limit: "200mb" }));
+  app.use(express.urlencoded({ limit: "200mb", extended: true }));
   
   // Convert WebM to MP4 endpoint
   app.post("/api/video/render", upload.single("video"), (req, res) => {
@@ -75,6 +76,7 @@ async function startServer() {
 
   // Server-side FFmpeg Stitching endpoint
   app.post("/api/video/stitch", async (req, res) => {
+    console.log(`Received stitch request. Payload size approx: ${JSON.stringify(req.body).length / 1024 / 1024} MB`);
     const { scenes, audioBase64 } = req.body;
     
     if (!scenes || !Array.isArray(scenes) || scenes.length === 0) {
@@ -140,6 +142,7 @@ async function startServer() {
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
+          '-vf scale=trunc(iw/2)*2:trunc(ih/2)*2',
           '-preset fast',
           '-crf 22',
           '-c:a aac',

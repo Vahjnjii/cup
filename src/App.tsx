@@ -1019,20 +1019,17 @@ jobs:
       // 2. Prepare scenes with calculated durations and convert blob URLs to base64
       const processedScenes = await Promise.all(scenes.map(async (scene, i) => {
         const nextTimestamp = i < scenes.length - 1 ? scenes[i + 1].timestamp : duration;
-        let imgBase64 = "";
+        let imgFinal = scene.imageUrl;
         
-        if (scene.imageUrl) {
+        if (scene.imageUrl && (scene.imageUrl.startsWith('blob:') || !scene.imageUrl.startsWith('http'))) {
           try {
             if (scene.imageUrl.startsWith('data:')) {
-              imgBase64 = scene.imageUrl;
+              imgFinal = scene.imageUrl;
             } else {
               const imgRes = await fetch(scene.imageUrl);
               const imgBlob = await imgRes.blob();
-              imgBase64 = await blobToBase64(imgBlob);
-              // Ensure it has the data prefix if blobToBase64 doesn't include it
-              if (!imgBase64.startsWith('data:')) {
-                imgBase64 = `data:image/webp;base64,${imgBase64}`;
-              }
+              const base64 = await blobToBase64(imgBlob);
+              imgFinal = base64.startsWith('data:') ? base64 : `data:image/webp;base64,${base64}`;
             }
           } catch (e) {
             console.error(`Failed to convert image ${i} to base64`, e);
@@ -1040,7 +1037,7 @@ jobs:
         }
 
         return {
-          imageUrl: imgBase64 || scene.imageUrl, // Fallback to URL if base64 failed (though URL will likely fail on server)
+          imageUrl: imgFinal,
           duration: Math.max(0.1, nextTimestamp - scene.timestamp)
         };
       }));
