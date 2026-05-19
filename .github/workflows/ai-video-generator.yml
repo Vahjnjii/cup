@@ -1,0 +1,120 @@
+name: AI Video Generator
+
+on:
+  push:
+    paths:
+      - 'projects/**/timeline.txt'
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: 'Project ID to render'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install Puppeteer and FFmpeg
+        run: |
+          npm install puppeteer
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+        
+      - name: Render Video with Puppeteer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_URL: https://vahjnjii.github.io/cup/
+        run: |
+          cat << 'EOF' > render.cjs
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          
+          async function run() {
+            // Use global object to avoid Vite crashing or altering process.env
+            const projId = process.argv[2];
+            const appUrl = process.argv[3];
+            const token = process['env']['GITHUB_TOKEN'];
+            
+            const browser = await puppeteer.launch({
+              headless: "new",
+              args: ['--no-sandbox', '--disable-web-security', '--autoplay-policy=no-user-gesture-required', '--use-gl=egl', '--window-size=1080,1920']
+            });
+            
+            const page = await browser.newPage();
+            
+            // Allow downloads
+            const client = await page.target().createCDPSession();
+            await client.send('Page.setDownloadBehavior', {
+              behavior: 'allow',
+              downloadPath: process.cwd()
+            });
+            
+            await page.setViewport({ width: 1080, height: 1920, deviceScaleFactor: 1 });
+            
+            await page.evaluateOnNewDocument((ghToken) => {
+              localStorage.setItem('GITHUB_TOKEN', ghToken);
+              window.isHeadless = true;
+            }, token);
+            
+            // Clean up appUrl logic
+            const url = `${appUrl}?projectId=${projId}&render=true`;
+            console.log(`Navigating to ${url}`);
+            
+            await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
+            
+            console.log("Waiting for render to finish... This takes the duration of the audio.");
+            await page.waitForFunction('!!window._renderComplete', { timeout: 30 * 60 * 1000 });
+            
+            console.log("Render complete on frontend! Waiting for download...");
+            
+            const checkFile = () => new Promise(r => {
+              const iv = setInterval(() => {
+                if (fs.existsSync('preview.webm')) {
+                  clearInterval(iv);
+                  setTimeout(r, 2000); // wait a bit for file to flush
+                }
+              }, 1000);
+            });
+            
+            await checkFile();
+            await browser.close();
+          }
+          run().catch(e => { console.error(e); process.exit(1); });
+          EOF
+          
+          CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r ${{ github.sha }} || echo "")
+          PROJECT_ID="${{ github.event.inputs.project_id }}"
+          
+          if [ -z "$PROJECT_ID" ]; then
+            for timeline in $(echo "$CHANGED_FILES" | grep 'timeline.txt' || true); do
+              if [ -f "$timeline" ]; then
+                PROJECT_ID=$(basename $(dirname "$timeline"))
+                break
+              fi
+            done
+          fi
+          
+          if [ ! -z "$PROJECT_ID" ]; then
+            echo "Rendering project $PROJECT_ID"
+            node render.cjs "$PROJECT_ID" "${{ env.APP_URL }}"
+            
+            if [ -f preview.webm ]; then
+              echo "Converting WebM to MP4..."
+              ffmpeg -i preview.webm -c:v libx264 -preset slow -crf 18 -c:a aac -b:a 192k output.mp4
+              gh release create "vid-${PROJECT_ID}" output.mp4 --title "Video ${PROJECT_ID}" --notes "Rendered exact MP4 preview via Headless Browser Action" || true
+            else
+              echo "Error: preview.webm not found"
+              exit 1
+            fi
+          fi
