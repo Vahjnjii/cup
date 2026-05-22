@@ -214,7 +214,7 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
     console.log(`[${jobId}] Uploading to GitHub releases...`);
 
     if (githubToken) {
-       await uploadToGithubRelease(githubToken, jobId, outputPath);
+       await uploadToGithubRelease(githubToken, jobId, outputPath, script);
     }
 
     job.status = 'completed';
@@ -235,7 +235,7 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
   }
 }
 
-async function uploadToGithubRelease(token: string, jobId: string, mp4Path: string) {
+async function uploadToGithubRelease(token: string, jobId: string, mp4Path: string, scriptText: string) {
     const octokit = new (await import("@octokit/rest")).Octokit({ auth: token });
     const { data: user } = await octokit.users.getAuthenticated();
     const owner = user.login;
@@ -246,10 +246,50 @@ async function uploadToGithubRelease(token: string, jobId: string, mp4Path: stri
     } catch(e: any) {
       if (e.status === 404) {
          await octokit.repos.createForAuthenticatedUser({ name: repo, private: true, auto_init: true });
-         await new Promise(r => setTimeout(r, 3000));
+         await new Promise(r => setTimeout(r, 4000));
       } else {
          throw e;
       }
+    }
+
+    // First commit the script to projects/jobId/script.txt so it shows in the sidebar tree
+    try {
+      let refSha;
+      let baseTreeSha;
+      try {
+        const { data: ref } = await octokit.git.getRef({ owner, repo, ref: 'heads/main' });
+        refSha = ref.object.sha;
+        const { data: commit } = await octokit.git.getCommit({ owner, repo, commit_sha: refSha });
+        baseTreeSha = commit.tree.sha;
+      } catch (e: any) {
+        // empty repo case
+        baseTreeSha = undefined;
+      }
+
+      const scriptBase64 = Buffer.from(scriptText).toString('base64');
+      const { data: scriptBlob } = await octokit.git.createBlob({ owner, repo, content: scriptBase64, encoding: 'base64' });
+      
+      const treeData = [
+        { path: `projects/${jobId}/script.txt`, mode: '100644' as const, type: 'blob' as const, sha: scriptBlob.sha }
+      ];
+
+      const treeParams: any = { owner, repo, tree: treeData };
+      if (baseTreeSha) treeParams.base_tree = baseTreeSha;
+      
+      const { data: newTree } = await octokit.git.createTree(treeParams);
+      const commitParams: any = { owner, repo, message: `Add video project ${jobId}`, tree: newTree.sha };
+      if (refSha) commitParams.parents = [refSha];
+      
+      const { data: newCommit } = await octokit.git.createCommit(commitParams);
+
+      if (refSha) {
+        await octokit.git.updateRef({ owner, repo, ref: 'heads/main', sha: newCommit.sha });
+      } else {
+        await octokit.git.createRef({ owner, repo, ref: 'refs/heads/main', sha: newCommit.sha });
+      }
+    } catch (e) {
+      console.error("Failed writing script.txt tree", e);
+      // ignoring so we still finish release
     }
 
     const { data: release } = await octokit.repos.createRelease({

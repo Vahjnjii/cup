@@ -156,7 +156,12 @@ export default function App() {
   const [imageUrlsInputText, setImageUrlsInputText] = useState('');
   const [saveStatus, setSaveStatus] = useState<{ type: 'idle' | 'saving' | 'success' | 'error', message: string }>({ type: 'idle', message: '' });
   const [selectedVoice, setSelectedVoice] = useState('Charon');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return !!localStorage.getItem('lastActiveJobId');
+    }
+    return false;
+  });
   const [regeneratingIdx, setRegeneratingIdx] = useState<number | null>(null);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
@@ -1462,7 +1467,20 @@ jobs:
     setRegeneratingIdx(null);
   };
 
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('lastActiveJobId');
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (activeJobId) {
+      localStorage.setItem('lastActiveJobId', activeJobId);
+    } else {
+      localStorage.removeItem('lastActiveJobId');
+    }
+  }, [activeJobId]);
 
   useEffect(() => {
     let intv: any;
@@ -1503,9 +1521,8 @@ jobs:
 
         } catch(e) {
              console.error("Job check failed", e);
-             setError("Lost connection to backend job");
-             setIsGenerating(false);
-             setActiveJobId(null);
+             // Error("Lost connection to backend job");
+             // don't immediately fail, wait 1 more retry or just silently wait
         }
       }, 2000);
     }
@@ -2459,36 +2476,11 @@ jobs:
                     <button
                       onClick={() => generateFullVideo()}
                       disabled={isGenerating || !script.trim()}
-                      className="shrink-0 h-[36px] w-[36px] bg-orange-500 hover:bg-orange-600 text-black rounded-lg flex items-center justify-center shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
-                      title="Generate Video (Browser)"
+                      className="shrink-0 h-[36px] px-3 bg-orange-500 hover:bg-orange-600 text-black font-bold tracking-wide rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
+                      title="Generate Full Video (Backend)"
                     >
-                      {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} fill="currentColor" />}
+                      {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <><Sparkles size={16} fill="currentColor" /> <span className="text-[12px] uppercase">Generate</span></>}
                     </button>
-                    {githubToken && user && (
-                      <button
-                        onClick={async () => {
-                          if (!script.trim()) return;
-                          setIsGenerating(true);
-                          setStatus('Triggering Background Generation...');
-                          try {
-                            const workers = imageUrls.length ? imageUrls : [];
-                            const keys = apiKeys.length ? apiKeys : [];
-                            const o = new Octokit({ auth: githubToken });
-                            await uploadRawProjectToGitHub(o, user.login, Date.now().toString(), script, keys, workers);
-                            setStatus(`Background generation started! You can safely close the browser. Check the ${getProjectRepoName()} Actions tab!`);
-                            setScript('');
-                          } catch(e: any) {
-                            setStatus('Error sending to background: ' + e.message);
-                          }
-                          setIsGenerating(false);
-                        }}
-                        disabled={isGenerating || !script.trim()}
-                        className="shrink-0 h-[36px] w-[36px] bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
-                        title="Generate in Background (GitHub Actions)"
-                      >
-                        {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-                      </button>
-                    )}
                   </div>
               </div>
             </motion.div>
