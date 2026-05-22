@@ -1484,6 +1484,7 @@ jobs:
 
   useEffect(() => {
     let intv: any;
+    let failCount = 0;
     if (activeJobId) {
       intv = setInterval(async () => {
         try {
@@ -1492,6 +1493,7 @@ jobs:
              throw new Error("Job missing");
           }
           const job = await res.json();
+          failCount = 0; // reset on success
           setProgress(job.progress);
           
           if (job.status === 'idle') setStatus('Initializing backend generation...');
@@ -1521,8 +1523,12 @@ jobs:
 
         } catch(e) {
              console.error("Job check failed", e);
-             // Error("Lost connection to backend job");
-             // don't immediately fail, wait 1 more retry or just silently wait
+             failCount++;
+             if (failCount > 3) {
+                 setError("Lost connection to backend job. The server might have restarted, please try again.");
+                 setIsGenerating(false);
+                 setActiveJobId(null);
+             }
         }
       }, 2000);
     }

@@ -3,6 +3,9 @@ import fs from "fs";
 import { GoogleGenAI, Modality } from "@google/genai";
 import axios from "axios";
 import ffmpeg from "fluent-ffmpeg";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 export interface JobState {
   id: string;
@@ -160,9 +163,10 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
         }
         if (!success) {
             console.error(`Failed to generate image ${i}`);
-            const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
-            fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), pixel);
-             job.scenes[i].imageUrl = 'data:image/png;base64,' + pixel.toString('base64');
+            // Use a proper black JPEG image instead of PNG to prevent FFmpeg concat demuxer errors
+            const blackJpeg = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
+            fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), blackJpeg);
+            job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + blackJpeg.toString('base64');
         }
         
         job.progress = 25 + (i / job.scenes.length) * 40;
@@ -205,7 +209,11 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
         ])
         .save(outputPath)
         .on('end', () => resolve(true))
-        .on('error', (err) => reject(err));
+        .on('error', (err, stdout, stderr) => {
+            console.error("FFmpeg Error:", err);
+            console.error("FFmpeg Stderr:", stderr);
+            reject(new Error("Video stitching failed: " + err.message));
+        });
     });
 
     job.status = 'uploading';
