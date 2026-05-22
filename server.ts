@@ -7,10 +7,12 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import axios from "axios";
 import dotenv from "dotenv";
+import { runJob, activeJobs } from "./jobStore";
 
 dotenv.config();
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
 
 const upload = multer({ dest: "tmp/" });
 
@@ -35,6 +37,63 @@ async function startServer() {
   app.use(express.json({ limit: "200mb" }));
   app.use(express.urlencoded({ limit: "200mb", extended: true }));
   
+  // Endpoints for persisting frontend state
+  const stateFilePath = path.join("tmp", "app_state.json");
+  
+  app.get("/api/state", (req, res) => {
+    try {
+      if (fs.existsSync(stateFilePath)) {
+        const data = fs.readFileSync(stateFilePath, "utf-8");
+        return res.json(JSON.parse(data));
+      }
+      res.json({});
+    } catch (e) {
+      console.error("Reading state failed:", e);
+      res.json({});
+    }
+  });
+
+  app.post("/api/state", (req, res) => {
+    try {
+      if (!fs.existsSync("tmp")) fs.mkdirSync("tmp");
+      fs.writeFileSync(stateFilePath, JSON.stringify(req.body, null, 2));
+      res.json({ success: true });
+    } catch (e) {
+      console.error("Writing state failed:", e);
+      res.status(500).json({ error: "Failed to save state" });
+    }
+  });
+
+  // Create a new Background Generation Job
+  app.post("/api/generate", (req, res) => {
+    try {
+      const { script, apiKeys, imageWorkers, githubToken, voice } = req.body;
+      if (!script) return res.status(400).json({ error: "Missing script" });
+      if (!githubToken) return res.status(400).json({ error: "Missing githubToken" });
+      if (!apiKeys || apiKeys.length === 0) return res.status(400).json({ error: "Missing Gemini APIs" });
+
+      const jobId = Date.now().toString();
+      
+      // Kickoff background job
+      runJob(jobId, script, apiKeys, imageWorkers, githubToken, voice).catch(err => {
+        console.error("Job runner crashed:", err);
+      });
+
+      res.json({ jobId });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Get status of a background job
+  app.get("/api/job/:jobId", (req, res) => {
+    const job = activeJobs.get(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: "Job not found or expired" });
+    }
+    res.json(job);
+  });
+
   // Convert WebM to MP4 endpoint
   app.post("/api/video/render", upload.single("video"), (req, res) => {
     if (!req.file) {
@@ -180,7 +239,8 @@ async function startServer() {
     }
   });
 
-  if (process.env.NODE_ENV !== "production") {
+  const isProd = process.env.NODE_ENV === "production" || !!process.env.K_SERVICE;
+  if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

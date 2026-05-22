@@ -1462,6 +1462,56 @@ jobs:
     setRegeneratingIdx(null);
   };
 
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let intv: any;
+    if (activeJobId) {
+      intv = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/job/${activeJobId}`);
+          if (!res.ok) {
+             throw new Error("Job missing");
+          }
+          const job = await res.json();
+          setProgress(job.progress);
+          
+          if (job.status === 'idle') setStatus('Initializing backend generation...');
+          else if (job.status === 'generating_voice') setStatus('Synthesizing voice...');
+          else if (job.status === 'planning') setStatus(`Plan created, Audio Duration: ${job.duration?.toFixed(1)}s. Planning visual scenes...`);
+          else if (job.status === 'generating_images') setStatus('Generating images with Cloudflare SD workers...');
+          else if (job.status === 'stitching') setStatus('Stitching video frames and audio rapidly via FFmpeg...');
+          else if (job.status === 'uploading') setStatus('Uploading MP4 to your GitHub Releases...');
+          else if (job.status === 'completed') {
+             setStatus(`Success! Project saved securely in your GitHub Releases.`);
+             setIsGenerating(false);
+             setActiveJobId(null);
+          } else if (job.status === 'failed') {
+             setError(job.error || "Backend job failed");
+             setStatus("");
+             setIsGenerating(false);
+             setActiveJobId(null);
+          }
+
+          if (job.scenes && job.scenes.length > 0) {
+            setScenes(job.scenes);
+          }
+          if (job.audioBase64 && !audioUrl) {
+            setAudioUrl(`data:audio/wav;base64,${job.audioBase64}`);
+            setDuration(job.duration || 0);
+          }
+
+        } catch(e) {
+             console.error("Job check failed", e);
+             setError("Lost connection to backend job");
+             setIsGenerating(false);
+             setActiveJobId(null);
+        }
+      }, 2000);
+    }
+    return () => clearInterval(intv);
+  }, [activeJobId, audioUrl]);
+
   const generateFullVideo = async (providedScript?: string) => {
     const textToUse = providedScript || script;
     if (!textToUse.trim()) {
@@ -1475,145 +1525,32 @@ jobs:
     setIsGenerating(true);
     setError(null);
     setProgress(0);
+    setScenes([]);
+    setAudioUrl(null);
+    setStatus('Dispatching task to backend...');
 
     try {
-      const { duration: audioDuration, base64: audioBase64 } = await generateVoiceover(textToUse);
-      setStatus('Planning story based on audio duration...');
-      
-      const planResponse = await generateContentWithRetry({
-        model: "gemini-3-flash-preview",
-        contents: [{ parts: [{ text: textToUse }] }],
-        config: {
-          systemInstruction: `You are a cinematic video producer. Divide the provided script into MANY small chronological segments of roughly 6 seconds each to ensure visual variety, matching the total duration of ${audioDuration.toFixed(1)} seconds.
-          
-          For each segment, you must provide:
-          1. "timestamp": The calculated start time in seconds.
-          2. "prompt": A deeply emotional, dark psychological anime style prompt focusing on "heart-touching" human vulnerability.
-             CRITICAL: Each image must be visually unique. Avoid generic background repetitions.
-          3. "text": The EXACT portion of the script corresponding to this timeframe.
-          
-          Output as a clean JSON array of objects. No extra text or explanations.`,
-          responseMimeType: "application/json",
-        }
-      }, apiKeys);
+      const payload = {
+        script: textToUse,
+        apiKeys: apiKeys,
+        imageWorkers: imageUrls,
+        githubToken: githubToken || "",
+        voice: selectedVoice
+      };
 
-      let text = planResponse.text;
-      if (!text) throw new Error("Planning failed.");
-
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (jsonMatch) text = jsonMatch[0];
-
-      const parsedPlan = JSON.parse(text);
-      if (!Array.isArray(parsedPlan)) throw new Error("Invalid plan format");
-
-      const PAUSE_DUR = 0.5;
-      const WORD_DUR = 0.3;
-      
-      const baseDurations = parsedPlan.map(s => {
-        const wordCount = (s.text || "").split(/\s+/).length;
-        return (wordCount * WORD_DUR) + PAUSE_DUR;
-      });
-      
-      const totalBaseDuration = baseDurations.reduce((a, b) => a + b, 0);
-      const scale = audioDuration / (totalBaseDuration || 1);
-      
-      let runningTime = 0;
-      const scenePlan: Scene[] = parsedPlan.map((s, i) => {
-        const startTime = runningTime;
-        runningTime += baseDurations[i] * scale;
-        return {
-          ...s,
-          timestamp: startTime,
-          prompt: s.prompt || "Cinematic atmosphere",
-          text: s.text || ""
-        };
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
 
-      setScenes(scenePlan);
-      setStatus('Painting scenes...');
-      
-      let completed = 0;
-      const gatheredBlobs: (Blob | null)[] = new Array(scenePlan.length).fill(null);
-      
-      const imagePromises = scenePlan.map(async (scene, i) => {
-        let attempts = 0;
-        let success = false;
-        
-        while (attempts < 3 && !success) {
-          try {
-            const sanitizedScenePrompt = sanitizePrompt(scene.prompt);
-            const fullPrompt = `Deeply dark psychological anime/manga style, heart-touching human vulnerability, cinematic composition, ${sanitizedScenePrompt}, masterpiece, high quality, expressive shadows, soulful atmosphere, no text.`;
-            const blob = await generateImageFromProviders(fullPrompt);
-            const url = URL.createObjectURL(blob);
-            
-            gatheredBlobs[i] = blob;
-            setScenes(prev => {
-              const next = [...prev];
-              next[i] = { ...next[i], imageUrl: url, blob };
-              return next;
-            });
-            success = true;
-          } catch (err) {
-            attempts++;
-            console.warn(`Scene ${i} attempt ${attempts} failed:`, err);
-            if (attempts >= 3) break;
-          }
-        }
-        
-        completed++;
-        setProgress((completed / scenePlan.length) * 100);
-        return success;
-      });
-
-      await Promise.all(imagePromises);
-
-      if (githubToken && user && !(window as any).isHeadless) {
-        setStatus('Uploading assets to GitHub to render remotely in background...');
-        try {
-          const octokit = new Octokit({ auth: githubToken });
-          const imagesPayload = [];
-          for (let i = 0; i < scenePlan.length; i++) {
-             const blob = gatheredBlobs[i];
-             if (blob) {
-                 const b64 = await blobToBase64(blob);
-                 imagesPayload.push({ filename: `image_${i}.jpg`, base64: b64 });
-             }
-          }
-          
-          let timelineText = "";
-          for (let i = 0; i < scenePlan.length; i++) {
-             timelineText += `file 'images/image_${i}.jpg'\n`;
-             const nextTimestamp = i < scenePlan.length - 1 ? scenePlan[i+1].timestamp : scenePlan[i].timestamp + 5;
-             timelineText += `duration ${nextTimestamp - scenePlan[i].timestamp}\n`;
-          }
-          
-          await uploadProjectToGitHub(
-             octokit, 
-             user.login, 
-             Date.now().toString(),
-             audioBase64,
-             imagesPayload,
-             timelineText,
-             textToUse,
-             scenePlan
-          );
-          setStatus(`Project safely sent to GitHub! The Action is now rendering the exact same preview to MP4 in the ${getProjectRepoName()} repository Actions tab.`);
-        } catch (e: any) {
-          console.error(e);
-          setStatus('Failed to upload to GitHub: ' + e.message + '. Falling back to high-speed stitch...');
-          if (!(window as any).isHeadless) setTimeout(() => handleStitchVideo(), 500);
-        }
-      } else {
-        setStatus((window as any).isHeadless ? 'Headless generation complete, handing off to renderer...' : 'Starting server-side FFmpeg stitch...');
-        if (!(window as any).isHeadless) {
-          setTimeout(() => {
-            handleStitchVideo();
-          }, 500);
-        }
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || "Failed to start background job");
       }
-      setIsGenerating(false);
-      setProgress(100);
-      
+
+      const { jobId } = await res.json();
+      setActiveJobId(jobId);
     } catch (err: any) {
       setError(err.message || 'Workflow error');
       setIsGenerating(false);
