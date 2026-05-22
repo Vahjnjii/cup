@@ -156,7 +156,19 @@ async function startServer() {
       const audioBuffer = Buffer.from(audioBase64, "base64");
       fs.writeFileSync(audioPath, audioBuffer);
 
+      const srtFilePath = path.join(sessionDir, "subs.srt");
+      let srtContent = "";
+
+      const formatSrtTime = (seconds: number) => {
+          const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
+          const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+          const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+          const ms = Math.floor((seconds * 1000) % 1000).toString().padStart(3, '0');
+          return `${h}:${m}:${s},${ms}`;
+      };
+
       // Process scenes
+      let validScenesCount = 0;
       for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
         const imgPath = path.join(sessionDir, `img_${i}.webp`);
@@ -171,13 +183,11 @@ async function startServer() {
             fs.writeFileSync(imgPath, response.data);
           } catch (dlErr) {
             console.error(`Failed to download image from ${scene.imageUrl}`, dlErr);
-            continue;
+            continue; // Skip this scene if we fail to download image
           }
         } else {
           console.warn(`Invalid image URL at scene ${i}:`, scene.imageUrl);
-          // Create a dummy black image or skip? Let's skip and see if it breaks concat.
-          // Better: skip from concat if image missing
-          continue;
+          continue; // Skip this scene
         }
         
         imagePaths.push(imgPath);
@@ -186,37 +196,27 @@ async function startServer() {
         // But for now we rely on the duration provided by the client
         concatContent += `file '${path.resolve(imgPath)}'\n`;
         concatContent += `duration ${scene.duration}\n`;
+
+        // Build SRT
+        const start = scene.timestamp;
+        const end = scene.timestamp + (scene.duration || 5);
+        srtContent += `${validScenesCount + 1}\n`;
+        srtContent += `${formatSrtTime(start)} --> ${formatSrtTime(end)}\n`;
+        srtContent += `${scene.text}\n\n`;
+        validScenesCount++;
       }
       
       // FFmpeg quirk: last image needs to be repeated or it might be cut off
-      if (scenes.length > 0) {
+      if (imagePaths.length > 0) {
         concatContent += `file '${path.resolve(imagePaths[imagePaths.length - 1])}'\n`;
       }
 
       fs.writeFileSync(concatFilePath, concatContent);
+      fs.writeFileSync(srtFilePath, srtContent);
 
       const outputPath = path.join(sessionDir, "output.mp4");
 
-      const fontPath = path.join(sessionDir, "Roboto-Bold.ttf");
-      try {
-        const fontRes = await axios.get('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf', { responseType: 'arraybuffer' });
-        fs.writeFileSync(fontPath, Buffer.from(fontRes.data));
-      } catch(e) {
-        console.error("Font failed to load");
-      }
-      
-      const drawtextFilters: string[] = [];
-      for(let i=0; i<scenes.length; i++) {
-         const scene = scenes[i];
-         if (!scene.text) continue;
-         const start = scene.timestamp;
-         const end = scene.timestamp + (scene.duration || 5);
-         let t = scene.text.replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/,/g, "\\,");
-         drawtextFilters.push(`drawtext=fontfile='${path.resolve(fontPath).replace(/\\/g, '/').replace(/:/g, '\\\\:')}':text='${t}':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-text_h-150:enable='between(t,${start},${end})'`);
-      }
-
-      const vfDrawtext = drawtextFilters.length > 0 ? ',' + drawtextFilters.join(',') : '';
-      const vFilter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30${vfDrawtext}`;
+      const vfParams = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,subtitles=${path.resolve(srtFilePath).replace(/\\/g, '/').replace(/:/g, '\\\\:')}:force_style='Fontname=Arial,Fontsize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=0,Alignment=2,MarginV=50'`;
 
       console.log("Starting FFmpeg stitch for session:", sessionId);
 
@@ -227,7 +227,7 @@ async function startServer() {
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
-          `-vf`, vFilter,
+          `-vf`, vfParams,
           '-preset fast',
           '-crf 22',
           '-c:a aac',

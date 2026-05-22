@@ -2151,7 +2151,7 @@ jobs:
           </div>
 
           <div className="flex items-center gap-3">
-             {scenes.length > 0 && !isPlaying && dbProjects.find(p => p.id === selectedProjectId)?.status !== 'rendering' && (
+             {selectedProjectId !== activeJobId && scenes.length > 0 && !isPlaying && dbProjects.find(p => p.id === selectedProjectId)?.status !== 'rendering' && (
                <button
                  onClick={() => {
                    if (window.confirm("This will use server-side FFmpeg to stitch your scenes into a high-quality video instantly. Proceed?")) {
@@ -2166,7 +2166,7 @@ jobs:
              )}
 
              {selectedProjectId && dbProjects.find(p => p.id === selectedProjectId) && (
-               dbProjects.find(p => p.id === selectedProjectId)?.status === 'ready' ? (
+               (dbProjects.find(p => p.id === selectedProjectId)?.status === 'ready' && selectedProjectId !== activeJobId) ? (
                  <button 
                    onClick={() => {
                      const url = dbProjects.find(p => p.id === selectedProjectId)?.videoUrl;
