@@ -134,19 +134,26 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
     activeJobs.set(jobId, { ...job });
 
     console.log(`[${jobId}] Generating images for ${job.scenes.length} scenes...`);
-    const imageWorkersCycle = imageWorkers && imageWorkers.length > 0 ? imageWorkers : ["https://worker-blue-shadow-1be1.vaishakhaphotos2.workers.dev"];
+    
+    // Add default workers
+    const activeImageWorkers = imageWorkers && imageWorkers.length > 0 ? imageWorkers : [
+        "https://flux1.shreevathsa2k27.workers.dev/",
+        "https://flux.shreevathsa2k21-4fa.workers.dev/",
+        "https://flux.vaishakhaphotos2.workers.dev/"
+    ];
     
     for (let i = 0; i < job.scenes.length; i++) {
         const scene = job.scenes[i];
-        let workerUrl = imageWorkersCycle[i % imageWorkersCycle.length];
+        let workerUrl = activeImageWorkers[i % activeImageWorkers.length];
         const fullPrompt = `Deeply dark psychological anime/manga style, heart-touching human vulnerability, cinematic composition, ${scene.prompt}, masterpiece, high quality, expressive shadows, soulful atmosphere, no text.`;
         
         let success = false;
+        
+        // 1. Try workers
         for(let attempts = 0; attempts < 3 && !success; attempts++) {
            try {
-             const sdUrl = "https://worker-blue-shadow-1be1.vaishakhaphotos2.workers.dev"; 
-             const finalUrl = workerUrl || sdUrl;
-             const res = await axios.post(finalUrl, 
+             workerUrl = activeImageWorkers[(i + attempts) % activeImageWorkers.length];
+             const res = await axios.post(workerUrl, 
                { inputs: fullPrompt },
                { responseType: 'arraybuffer', timeout: 30000 }
              );
@@ -158,15 +165,43 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
              job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + imgBuffer.toString('base64');
              success = true;
            } catch(err: any) {
-             console.warn(`[${jobId}] Image ${i} attempt ${attempts} failed`);
+             console.warn(`[${jobId}] Image ${i} attempt ${attempts} failed on worker ${workerUrl}`);
            }
         }
+        
+        // 2. Fallback to Pollinations
         if (!success) {
-            console.error(`Failed to generate image ${i}`);
-            // Use a proper black JPEG image instead of PNG to prevent FFmpeg concat demuxer errors
-            const blackJpeg = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
-            fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), blackJpeg);
-            job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + blackJpeg.toString('base64');
+           console.log(`[${jobId}] Attempting Pollinations fallback for scene ${i}`);
+           try {
+              const polyRes = await axios.get(`https://image.pollinations.ai/prompt/${encodeURIComponent(fullPrompt)}?width=768&height=1344&nologo=true`, {
+                  responseType: 'arraybuffer', timeout: 20000
+              });
+              const imgBuffer = Buffer.from(polyRes.data, 'binary');
+              const imgPath = path.join(sessionDir, `img_${i}.jpg`);
+              fs.writeFileSync(imgPath, imgBuffer);
+              job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + imgBuffer.toString('base64');
+              success = true;
+           } catch(e) {
+              console.warn(`[${jobId}] Pollinations fallback failed for scene ${i}`);
+           }
+        }
+
+        // 3. Last Resort Fallback Placeholder (creates a valid sized blank image using Pollinations URL that is guaranteed almost always fast or a pre-generated base64)
+        if (!success) {
+            console.error(`Failed to generate image ${i}, using solid black image`);
+            try {
+              const polyRes = await axios.get(`https://image.pollinations.ai/prompt/solid-black-darkness?width=768&height=1344&nologo=true`, {
+                 responseType: 'arraybuffer', timeout: 10000
+              });
+              const imgBuffer = Buffer.from(polyRes.data, 'binary');
+              fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), imgBuffer);
+              job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + imgBuffer.toString('base64');
+            } catch(e) {
+              // use a basic 8x8 black JPEG if even that fails
+              const blackJpeg = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAAIAAgBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
+              fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), blackJpeg);
+              job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + blackJpeg.toString('base64');
+            }
         }
         
         job.progress = 25 + (i / job.scenes.length) * 40;
@@ -179,19 +214,43 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
     console.log(`[${jobId}] Stitching video...`);
 
     const concatFilePath = path.join(sessionDir, "concat.txt");
+    const srtFilePath = path.join(sessionDir, "subs.srt");
     let concatContent = "";
+    let srtContent = "";
+
+    const formatSrtTime = (seconds: number) => {
+        const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
+        const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+        const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+        const ms = Math.floor((seconds * 1000) % 1000).toString().padStart(3, '0');
+        return `${h}:${m}:${s},${ms}`;
+    };
+
     for(let i = 0; i < job.scenes.length; i++) {
+        const scene = job.scenes[i];
         concatContent += `file '${path.resolve(sessionDir, `img_${i}.jpg`)}'\n`;
-        concatContent += `duration ${job.scenes[i].duration}\n`;
+        concatContent += `duration ${scene.duration}\n`;
+        
+        // Build SRT
+        const start = scene.timestamp;
+        const end = scene.timestamp + (scene.duration || 5);
+        srtContent += `${i + 1}\n`;
+        srtContent += `${formatSrtTime(start)} --> ${formatSrtTime(end)}\n`;
+        srtContent += `${scene.text}\n\n`;
     }
     if (job.scenes.length > 0) {
         concatContent += `file '${path.resolve(sessionDir, `img_${job.scenes.length - 1}.jpg`)}'\n`;
     }
     fs.writeFileSync(concatFilePath, concatContent);
+    fs.writeFileSync(srtFilePath, srtContent);
 
     const outputPath = path.join(sessionDir, "output.mp4");
 
     await new Promise((resolve, reject) => {
+        // Prepare complex filter string for robust scaling + subtitles without external font config
+        // Using subtitles filter with force_style for generic sans-serif fallback if needed
+        const vfParams = `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=${path.resolve(srtFilePath).replace(/\\/g, '/').replace(/:/g, '\\:')}:force_style='FontName=Arial,FontSize=24'`;
+
         ffmpeg()
         .input(concatFilePath)
         .inputOptions(["-f concat", "-safe 0"])
@@ -199,7 +258,7 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
-          '-vf scale=1080:1920',
+          `-vf ${vfParams}`,
           '-preset fast',
           '-crf 22',
           '-c:a aac',

@@ -1590,15 +1590,23 @@ jobs:
       }
 
       const { jobId } = await res.json();
-      setActiveJobId(jobId);
-      setSelectedProjectId(jobId);
       
-      // Inject optimistic local project into history
+      // We no longer set activeJobId here. We let the background polling handle all rendering jobs.
+      // We set activeJobId so it polls, but we clear selectedProjectId so the user is in a blank chat.
+      setActiveJobId(jobId);
+      
+      // Inject optimistic local project into history (prepended to top)
       setDbProjects(prev => {
-const prevItems = prev || [];
+        const prevItems = prev || [];
         const newProj: Project = { id: jobId, status: 'rendering', script: textToUse, userId: user?.id?.toString() || '0', createdAt: new Date() };
         return [newProj, ...prevItems];
       });
+
+      // Clear the UI so it looks like a new empty chat that they can use immediately
+      setScript('');
+      setOriginalScript('');
+      setSelectedProjectId(null);
+      setIsGenerating(false);
 
     } catch (err: any) {
       setError(err.message || 'Workflow error');
@@ -2075,7 +2083,10 @@ const prevItems = prev || [];
                            </span>
                            <span className="text-[10px] flex items-center gap-1 mt-1 font-mono uppercase tracking-tighter">
                               {p.status === 'rendering' ? (
-                                <span className="text-orange-500 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Syncing</span>
+                                <span className="text-orange-500 flex items-center gap-1">
+                                  <Loader2 size={10} className="animate-spin" />
+                                  {p.id === activeJobId && progress > 0 ? `RENDERING ${progress.toFixed(0)}%` : 'SYNCING'}
+                                </span>
                               ) : (
                                 <span className="text-emerald-500/70 flex items-center gap-1"><Video size={10} /> Ready</span>
                               )}

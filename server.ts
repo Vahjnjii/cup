@@ -206,7 +206,7 @@ async function startServer() {
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
-          '-vf scale=trunc(iw/2)*2:trunc(ih/2)*2',
+          '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2',
           '-preset fast',
           '-crf 22',
           '-c:a aac',
