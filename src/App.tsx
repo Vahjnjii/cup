@@ -2151,7 +2151,7 @@ jobs:
           </div>
 
           <div className="flex items-center gap-3">
-             {scenes.length > 0 && !isGenerating && !isPlaying && (
+             {scenes.length > 0 && !isPlaying && dbProjects.find(p => p.id === selectedProjectId)?.status !== 'rendering' && (
                <button
                  onClick={() => {
                    if (window.confirm("This will use server-side FFmpeg to stitch your scenes into a high-quality video instantly. Proceed?")) {
@@ -2183,12 +2183,12 @@ jobs:
                    className="flex items-center gap-2 border border-orange-500/50 text-orange-500 text-xs font-bold px-3 py-1.5 rounded-lg transition-transform opacity-70"
                  >
                    <Loader2 size={14} className="animate-spin" />
-                   Rendering on Cloud...
+                   {selectedProjectId === activeJobId && progress > 0 ? `Rendering ${progress.toFixed(0)}%...` : `Rendering on Cloud...`}
                  </button>
                )
              )}
 
-            {isGenerating && (
+            {selectedProjectId === activeJobId && (
                <div className="hidden sm:flex items-center gap-3 w-24">
                 <div className="h-1 w-full bg-zinc-900 rounded-full overflow-hidden">
                   <motion.div className="h-full bg-orange-500" animate={{ width: `${progress}%` }} />
@@ -2219,7 +2219,7 @@ jobs:
               }}
             />
 
-            {scenes.length === 0 && !isGenerating && (
+            {scenes.length === 0 && selectedProjectId !== activeJobId && (
               <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-zinc-950/50">
                 <div className="w-20 h-20 bg-orange-500/10 rounded-full flex items-center justify-center mb-6 ring-1 ring-orange-500/20">
                   <Sparkles size={32} className="text-orange-500 animate-pulse" />
@@ -2235,7 +2235,7 @@ jobs:
               </div>
             )}
             
-            {isGenerating && scenes.length === 0 && (
+            {selectedProjectId === activeJobId && scenes.length === 0 && (
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950">
                 <div className="relative mb-6">
                   <Loader2 size={48} className="text-orange-500 animate-spin" />
@@ -2513,11 +2513,11 @@ jobs:
                     />
                     <button
                       onClick={() => generateFullVideo()}
-                      disabled={isGenerating || !script.trim()}
+                      disabled={!script.trim()}
                       className="shrink-0 h-[32px] w-[32px] mb-0.5 bg-orange-500 hover:bg-orange-600 text-black font-bold tracking-wide rounded-md flex items-center justify-center shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
                       title="Generate Project"
                     >
-                      {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <ArrowUp size={16} strokeWidth={3} />}
+                      {activeJobId ? <Sparkles size={16} /> : <ArrowUp size={16} strokeWidth={3} />}
                     </button>
                   </div>
               </div>

@@ -197,6 +197,27 @@ async function startServer() {
 
       const outputPath = path.join(sessionDir, "output.mp4");
 
+      const fontPath = path.join(sessionDir, "Roboto-Bold.ttf");
+      try {
+        const fontRes = await axios.get('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf', { responseType: 'arraybuffer' });
+        fs.writeFileSync(fontPath, Buffer.from(fontRes.data));
+      } catch(e) {
+        console.error("Font failed to load");
+      }
+      
+      const drawtextFilters: string[] = [];
+      for(let i=0; i<scenes.length; i++) {
+         const scene = scenes[i];
+         if (!scene.text) continue;
+         const start = scene.timestamp;
+         const end = scene.timestamp + (scene.duration || 5);
+         let t = scene.text.replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/,/g, "\\,");
+         drawtextFilters.push(`drawtext=fontfile='${path.resolve(fontPath).replace(/\\/g, '/').replace(/:/g, '\\\\:')}':text='${t}':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-text_h-150:enable='between(t,${start},${end})'`);
+      }
+
+      const vfDrawtext = drawtextFilters.length > 0 ? ',' + drawtextFilters.join(',') : '';
+      const vFilter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30${vfDrawtext}`;
+
       console.log("Starting FFmpeg stitch for session:", sessionId);
 
       ffmpeg()
@@ -206,7 +227,7 @@ async function startServer() {
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
-          '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2',
+          `-vf`, vFilter,
           '-preset fast',
           '-crf 22',
           '-c:a aac',

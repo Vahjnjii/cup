@@ -186,18 +186,18 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
            }
         }
 
-        // 3. Last Resort Fallback Placeholder (creates a valid sized blank image using Pollinations URL that is guaranteed almost always fast or a pre-generated base64)
+        // 3. Last Resort Fallback Placeholder
         if (!success) {
-            console.error(`Failed to generate image ${i}, using solid black image`);
+            console.error(`Failed to generate image ${i}, using basic safe fallback image`);
             try {
-              const polyRes = await axios.get(`https://image.pollinations.ai/prompt/solid-black-darkness?width=768&height=1344&nologo=true`, {
+              // A completely safe, non-blocked prompt to ensure we get a valid frame at least
+              const polyRes = await axios.get(`https://image.pollinations.ai/prompt/cinematic%20anime%20scene%20beautiful%20sky?width=768&height=1344`, {
                  responseType: 'arraybuffer', timeout: 10000
               });
               const imgBuffer = Buffer.from(polyRes.data, 'binary');
               fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), imgBuffer);
               job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + imgBuffer.toString('base64');
             } catch(e) {
-              // use a basic 8x8 black JPEG if even that fails
               const blackJpeg = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAAIAAgBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=", "base64");
               fs.writeFileSync(path.join(sessionDir, `img_${i}.jpg`), blackJpeg);
               job.scenes[i].imageUrl = 'data:image/jpeg;base64,' + blackJpeg.toString('base64');
@@ -214,42 +214,47 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
     console.log(`[${jobId}] Stitching video...`);
 
     const concatFilePath = path.join(sessionDir, "concat.txt");
-    const srtFilePath = path.join(sessionDir, "subs.srt");
     let concatContent = "";
-    let srtContent = "";
-
-    const formatSrtTime = (seconds: number) => {
-        const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
-        const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
-        const s = Math.floor(seconds % 60).toString().padStart(2, '0');
-        const ms = Math.floor((seconds * 1000) % 1000).toString().padStart(3, '0');
-        return `${h}:${m}:${s},${ms}`;
-    };
 
     for(let i = 0; i < job.scenes.length; i++) {
         const scene = job.scenes[i];
         concatContent += `file '${path.resolve(sessionDir, `img_${i}.jpg`)}'\n`;
         concatContent += `duration ${scene.duration}\n`;
-        
-        // Build SRT
-        const start = scene.timestamp;
-        const end = scene.timestamp + (scene.duration || 5);
-        srtContent += `${i + 1}\n`;
-        srtContent += `${formatSrtTime(start)} --> ${formatSrtTime(end)}\n`;
-        srtContent += `${scene.text}\n\n`;
     }
     if (job.scenes.length > 0) {
         concatContent += `file '${path.resolve(sessionDir, `img_${job.scenes.length - 1}.jpg`)}'\n`;
     }
     fs.writeFileSync(concatFilePath, concatContent);
-    fs.writeFileSync(srtFilePath, srtContent);
 
     const outputPath = path.join(sessionDir, "output.mp4");
+    const fontPath = path.join(sessionDir, "Roboto-Bold.ttf");
+
+    try {
+        console.log(`[${jobId}] Downloading Roboto font for subtitles...`);
+        const fontRes = await axios.get('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf', { responseType: 'arraybuffer' });
+        fs.writeFileSync(fontPath, Buffer.from(fontRes.data));
+    } catch(e) {
+        console.error("Failed to download font, using default:", e);
+    }
 
     await new Promise((resolve, reject) => {
-        // Prepare complex filter string for robust scaling + subtitles without external font config
-        // Using subtitles filter with force_style for generic sans-serif fallback if needed
-        const vfParams = `scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,subtitles=${path.resolve(srtFilePath).replace(/\\/g, '/').replace(/:/g, '\\:')}:force_style='FontName=Arial,FontSize=24'`;
+        // Build drawtext filters for each scene to simulate subtitles
+        const drawtextFilters: string[] = [];
+        
+        for(let i=0; i<job.scenes.length; i++) {
+           const scene = job.scenes[i];
+           if (!scene.text) continue;
+           const start = scene.timestamp;
+           const end = scene.timestamp + (scene.duration || 5);
+           // Escape text for drawtext
+           let t = scene.text.replace(/'/g, "\u2019").replace(/:/g, "\\:").replace(/,/g, "\\,");
+           // For long text, drawtext doesn't word wrap magically. We can just use a large screen width and hope it fits, or let it overflow a bit for now.
+           // To be safe we'll use a slightly smaller font size than before.
+           drawtextFilters.push(`drawtext=fontfile='${path.resolve(fontPath).replace(/\\/g, '/').replace(/:/g, '\\\\:')}':text='${t}':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-text_h-150:enable='between(t,${start},${end})'`);
+        }
+
+        const vfDrawtext = drawtextFilters.length > 0 ? ',' + drawtextFilters.join(',') : '';
+        const vFilter = `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30${vfDrawtext}`;
 
         ffmpeg()
         .input(concatFilePath)
@@ -258,7 +263,7 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
-          `-vf ${vfParams}`,
+          `-vf`, vFilter,
           '-preset fast',
           '-crf 22',
           '-c:a aac',
@@ -270,7 +275,6 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
         .on('end', () => resolve(true))
         .on('error', (err, stdout, stderr) => {
             console.error("FFmpeg Error:", err);
-            console.error("FFmpeg Stderr:", stderr);
             reject(new Error("Video stitching failed: " + err.message));
         });
     });
