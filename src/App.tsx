@@ -24,7 +24,8 @@ import {
   ChevronDown,
   ChevronLeft,
   PenTool,
-  Menu
+  Menu,
+  ArrowUp
 } from 'lucide-react';
 import { Octokit } from '@octokit/rest';
 
@@ -239,6 +240,12 @@ export default function App() {
 
   useEffect(() => {
     if (selectedProjectId && githubToken && user) {
+      const proj = dbProjects.find(p => p.id === selectedProjectId);
+      if (proj && proj.status === 'rendering') {
+        // Skip GitHub fetch while it's actively rendering, let the job polling handle it
+        return;
+      }
+
       const loadProjectData = async () => {
         setIsLoadingProject(true);
         const octokit = new Octokit({ auth: githubToken });
@@ -326,6 +333,7 @@ export default function App() {
       
       loadProjectData();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, githubToken, user]);
 
   const [showVoiceSelector, setShowVoiceSelector] = useState(false);
@@ -1504,6 +1512,21 @@ jobs:
           else if (job.status === 'uploading') setStatus('Uploading MP4 to your GitHub Releases...');
           else if (job.status === 'completed') {
              setStatus(`Success! Project saved securely in your GitHub Releases.`);
+             if (job.scenes && job.scenes.length > 0) {
+               setScenes(job.scenes);
+             }
+             if (job.audioBase64) {
+               setAudioUrl(`data:audio/wav;base64,${job.audioBase64}`);
+               setDuration(job.duration || 0);
+             }
+             
+             // Update dbProjects
+             setDbProjects(prev => prev.map(p => 
+               p.id === activeJobId
+                 ? { ...p, status: 'ready', videoUrl: job.videoUrl }
+                 : p
+             ));
+
              setIsGenerating(false);
              setActiveJobId(null);
           } else if (job.status === 'failed') {
@@ -1511,14 +1534,6 @@ jobs:
              setStatus("");
              setIsGenerating(false);
              setActiveJobId(null);
-          }
-
-          if (job.scenes && job.scenes.length > 0) {
-            setScenes(job.scenes);
-          }
-          if (job.audioBase64 && !audioUrl) {
-            setAudioUrl(`data:audio/wav;base64,${job.audioBase64}`);
-            setDuration(job.duration || 0);
           }
 
         } catch(e) {
@@ -1552,6 +1567,8 @@ jobs:
     setAudioUrl(null);
     setStatus('Dispatching task to backend...');
 
+    setSelectedProjectId(null);
+
     try {
       const payload = {
         script: textToUse,
@@ -1574,6 +1591,15 @@ jobs:
 
       const { jobId } = await res.json();
       setActiveJobId(jobId);
+      setSelectedProjectId(jobId);
+      
+      // Inject optimistic local project into history
+      setDbProjects(prev => {
+const prevItems = prev || [];
+        const newProj: Project = { id: jobId, status: 'rendering', script: textToUse, userId: user?.id?.toString() || '0', createdAt: new Date() };
+        return [newProj, ...prevItems];
+      });
+
     } catch (err: any) {
       setError(err.message || 'Workflow error');
       setIsGenerating(false);
@@ -2204,7 +2230,9 @@ jobs:
                   <Loader2 size={48} className="text-orange-500 animate-spin" />
                   <div className="absolute inset-0 blur-xl bg-orange-500/20 animate-pulse" />
                 </div>
-                <h3 className="text-sm font-bold uppercase tracking-widest text-orange-500/80 mb-2">Crafting Vision</h3>
+                <h3 className="text-sm font-bold uppercase tracking-widest text-orange-500/80 mb-2">
+                  Crafting Vision <span className="text-white ml-2">{progress.toFixed(0)}%</span>
+                </h3>
                 <div className="w-48 h-1.5 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800">
                   <motion.div 
                     className="h-full bg-orange-500" 
@@ -2212,7 +2240,7 @@ jobs:
                     animate={{ width: `${progress}%` }} 
                   />
                 </div>
-                <p className="mt-4 text-[10px] font-mono text-zinc-500">{status}</p>
+                <p className="mt-4 text-[10px] font-mono text-zinc-500 max-w-sm text-center px-4">{status}</p>
               </div>
             )}
 
@@ -2401,15 +2429,8 @@ jobs:
 
         {/* Bottom chat input */}
         <div className="relative w-full">
-          {/* Toggle arrow & generating indicator */}
+          {/* Toggle arrow */}
           <div className="absolute left-1/2 bottom-full -translate-x-1/2 z-40 flex flex-col items-center">
-             {isGenerating && !showInputBar && (
-               <div className="mb-2 bg-zinc-900/90 backdrop-blur-md border border-orange-500/30 text-orange-400 px-4 py-1.5 rounded-full text-[10px] font-mono shadow-[0_0_15px_rgba(249,115,22,0.2)] flex items-center gap-2">
-                 <Loader2 size={12} className="animate-spin" />
-                 <span className="max-w-[150px] sm:max-w-[200px] truncate">{status || 'Generating...'}</span>
-                 <span className="font-bold">{progress.toFixed(0)}%</span>
-               </div>
-             )}
              <button 
                onClick={() => setShowInputBar(!showInputBar)} 
                className="bg-zinc-900 border border-zinc-800/80 text-zinc-400 hover:text-white px-4 py-1 rounded-t-xl hover:bg-zinc-800 transition-colors shadow-[0_-4px_10px_rgba(0,0,0,0.3)] flex items-center justify-center opacity-80 hover:opacity-100"
@@ -2476,16 +2497,16 @@ jobs:
                         }
                       }}
                       placeholder="Paste script... (Enter to execute)"
-                      className="flex-1 bg-transparent border-none text-[13px] text-zinc-200 placeholder:text-zinc-600 outline-none resize-none px-3 py-1.5 min-h-[36px] overflow-y-auto custom-scrollbar leading-relaxed"
+                      className="flex-1 bg-transparent border-none text-[13px] text-zinc-200 placeholder:text-zinc-600 outline-none resize-none px-3 py-1.5 min-h-[36px] overflow-y-auto custom-scrollbar leading-relaxed mb-0.5"
                       rows={1}
                     />
                     <button
                       onClick={() => generateFullVideo()}
                       disabled={isGenerating || !script.trim()}
-                      className="shrink-0 h-[36px] px-3 bg-orange-500 hover:bg-orange-600 text-black font-bold tracking-wide rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
-                      title="Generate Full Video (Backend)"
+                      className="shrink-0 h-[32px] w-[32px] mb-0.5 bg-orange-500 hover:bg-orange-600 text-black font-bold tracking-wide rounded-md flex items-center justify-center shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
+                      title="Generate Project"
                     >
-                      {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <><Sparkles size={16} fill="currentColor" /> <span className="text-[12px] uppercase">Generate</span></>}
+                      {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <ArrowUp size={16} strokeWidth={3} />}
                     </button>
                   </div>
               </div>

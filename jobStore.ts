@@ -222,7 +222,7 @@ export async function runJob(jobId: string, script: string, apiKey: string[], im
     console.log(`[${jobId}] Uploading to GitHub releases...`);
 
     if (githubToken) {
-       await uploadToGithubRelease(githubToken, jobId, outputPath, script);
+       job.videoUrl = await uploadToGithubRelease(githubToken, jobId, outputPath, script);
     }
 
     job.status = 'completed';
@@ -306,7 +306,7 @@ async function uploadToGithubRelease(token: string, jobId: string, mp4Path: stri
     });
 
     const fileData = fs.readFileSync(mp4Path);
-    await axios.post(
+    const { data: uploadRes } = await axios.post(
       release.upload_url.replace("{?name,label}", `?name=output.mp4`),
       fileData,
       {
@@ -318,6 +318,7 @@ async function uploadToGithubRelease(token: string, jobId: string, mp4Path: stri
         maxContentLength: Infinity
       }
     );
+    return uploadRes.browser_download_url;
 }
 
 function createWavHeader(dataLength: number, sampleRate: number) {
